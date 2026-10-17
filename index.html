@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>Three.js WebXR AR + Hit Test</title>
+    <style>
+        html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; font-family: sans-serif; }
+        #overlay {
+            position: fixed; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; color: #fff; z-index: 10;
+            background: rgba(0,0,0,0.7); text-align: center; padding: 20px;
+        }
+        #overlay.hidden { display: none; }
+        #startBtn {
+            padding: 14px 28px; font-size: 18px; border: none; border-radius: 8px;
+            background: #2979ff; color: #fff; cursor: pointer; margin-top: 20px;
+        }
+        #startBtn:disabled { background: #555; cursor: not-allowed; }
+        #info { position: fixed; top: 10px; left: 10px; color: #fff; z-index: 5;
+                background: rgba(0,0,0,0.4); padding: 6px 10px; border-radius: 6px; font-size: 13px; }
+    </style>
+</head>
+<body>
+
+<div id="info">Объектов размещено: <span id="count">0</span></div>
+
+<div id="overlay">
+    <h2>AR: размещение объектов</h2>
+    <p id="status">Проверка поддержки WebXR…</p>
+    <button id="startBtn" disabled>Запустить AR</button>
+</div>
+
+<script type="importmap">
+{
+    "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ---------- DOM ----------
+const overlay  = document.getElementById('overlay');
+const statusEl = document.getElementById('status');
+const startBtn = document.getElementById('startBtn');
+const countEl  = document.getElementById('count');
+
+// ---------- Three.js сцена ----------
+const scene    = new THREE.Scene();
+const camera   = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+// Освещение (иначе StandardMaterial будет чёрным)
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.0));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(1, 2, 1);
+scene.add(dirLight);
+
+// ---------- Визуальный маркер (кольцо) ----------
+const reticle = new THREE.Mesh(
+    new THREE.RingGeometry(0.05, 0.07, 32).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ color: 0x00ff88, side: THREE.DoubleSide })
+);
+reticle.matrixAutoUpdate = false; // позиция задаётся через matrix от hit-pose
+reticle.visible = false;
+scene.add(reticle);
+
+// ---------- Шаблон размещаемого объекта ----------
+function createPlacedObject() {
+    const group = new THREE.Group();
+    const box = new THREE.Mesh(
+        new THREE.BoxGeometry(0.1, 0.1, 0.1),
+        new THREE.MeshStandardMaterial({ color: 0x2979ff, metalness: 0.3, roughness: 0.6 })
+    );
+    box.position.y = 0.05; // чтобы куб стоял на поверхности, а не «врос» в неё
+    group.add(box);
+    return group;
+}
+
+// ---------- WebXR: проверка поддержки ----------
+let xrSession        = null;
+let hitTestSource    = null;
+let hitTestReady     = false;
+let localRefSpace    = null;   // local-floor — для размещения (мировые координаты)
+let viewerRefSpace   = null;   // viewer — источник hit-test
+
+if (!navigator.xr) {
+    statusEl.textContent = 'WebXR не поддерживается в этом браузере.';
+} else {
+    navigator.xr.isSessionSupported('immersive-ar').then(supported => {
+        if (supported) {
+            statusEl.textContent = 'Устройство поддерживает AR. Нажмите кнопку.';
+            startBtn.disabled = false;
+        } else {
+            statusEl.textContent = 'immersive-ar недоступен. Используйте Chrome на Android или WebXR Emulator.';
+        }
+    });
+}
+
+// ---------- Запуск AR-сессии ----------
+startBtn.addEventListener('click', startAR);
+
+async function startAR() {
+    try {
+        xrSession = await navigator.xr.requestSession('immersive-ar', {
+            requiredFeatures: ['hit-test'],          // hit-test обязателен
+            optionalFeatures: ['local-floor', 'dom-overlay'],
+            domOverlay: { root: document.body }      // чтобы overlay оставался поверх AR
+        });
+
+        renderer.xr.setReferenceSpaceType('local-floor');
+        await renderer.xr.setSession(xrSession);
+
+        // Reference spaces
+        localRefSpace  = await xrSession.requestReferenceSpace('local-floor');
+        viewerRefSpace = await xrSession.requestReferenceSpace('viewer');
+
+        // Создаём источник hit-test из пространства камеры
+        hitTestSource = await xrSession.requestHitTestSource({ space: viewerRefSpace });
+        hitTestReady  = true;
+
+        // Тап по экрану → размещаем объект
+        xrSession.addEventListener('select', onSelect);
+
+        // Завершение сессии
+        xrSession.addEventListener('end', onSessionEnd);
+
+        overlay.classList.add('hidden');
+        renderer.setAnimationLoop(render);
+    } catch (err) {
+        console.error(err);
+        statusEl.textContent = 'Ошибка запуска AR: ' + err.message;
+    }
+}
+
+// ---------- Размещение объекта ----------
+function onSelect() {
+    if (!reticle.visible) return; // размещаем только если нашли плоскость
+
+    const obj = createPlacedObject();
+    // Копируем мировую трансформацию маркера → объект зафиксируется в мировых координатах
+    obj.matrix.copy(reticle.matrix);
+    obj.matrixAutoUpdate = false;
+    scene.add(obj);
+
+    countEl.textContent = String(parseInt(countEl.textContent, 10) + 1);
+}
+
+// ---------- Завершение сессии ----------
+function onSessionEnd() {
+    xrSession = null;
+    hitTestSource = null;
+    hitTestReady = false;
+    reticle.visible = false;
+    overlay.classList.remove('hidden');
+    statusEl.textContent = 'AR-сессия завершена.';
+    startBtn.disabled = false;
+    renderer.setAnimationLoop(null);
+}
+
+// ---------- Рендер-цикл: обновляем маркер по hit-test ----------
+function render(timestamp, frame) {
+    if (!frame) return;
+
+    if (hitTestReady && hitTestSource) {
+        // results — массив попаданий по плоскостям в текущем кадре
+        const results = frame.getHitTestResults(hitTestSource);
+        if (results.length > 0) {
+            const hit  = results[0];
+            const pose = hit.getPose(localRefSpace); // ВАЖНО: pose в local-floor, чтобы координаты совпадали с размещаемыми объектами
+            reticle.visible = true;
+            reticle.matrix.fromArray(pose.transform.matrix);
+        } else {
+            reticle.visible = false;
+        }
+    }
+
+    renderer.render(scene, camera);
+}
+
+// ---------- Ресайз ----------
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
