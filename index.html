@@ -1,196 +1,296 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-    <title>Three.js WebXR AR + Hit Test</title>
-    <style>
-        html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; font-family: sans-serif; }
-        #overlay {
-            position: fixed; inset: 0; display: flex; flex-direction: column;
-            align-items: center; justify-content: center; color: #fff; z-index: 10;
-            background: rgba(0,0,0,0.7); text-align: center; padding: 20px;
-        }
-        #overlay.hidden { display: none; }
-        #startBtn {
-            padding: 14px 28px; font-size: 18px; border: none; border-radius: 8px;
-            background: #2979ff; color: #fff; cursor: pointer; margin-top: 20px;
-        }
-        #startBtn:disabled { background: #555; cursor: not-allowed; }
-        #info { position: fixed; top: 10px; left: 10px; color: #fff; z-index: 5;
-                background: rgba(0,0,0,0.4); padding: 6px 10px; border-radius: 6px; font-size: 13px; }
-    </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+<title>WebXR AR + Hit Test + 3D модель</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#000; overflow:hidden;
+               font-family: system-ui, sans-serif; }
+  #overlay { position:fixed; inset:0; z-index:10; display:flex; flex-direction:column;
+             align-items:center; justify-content:center; text-align:center;
+             background:rgba(0,0,0,.75); color:#fff; padding:24px; }
+  #overlay.hidden { display:none; }
+  button, .fileBtn { padding:12px 22px; font-size:16px; border:none; border-radius:8px;
+             background:#2979ff; color:#fff; cursor:pointer; margin:6px; }
+  button:disabled { background:#555; cursor:not-allowed; }
+  #arPanel { position:fixed; top:10px; left:10px; z-index:5; display:none;
+             background:rgba(0,0,0,.45); color:#fff; padding:8px 10px;
+             border-radius:10px; font-size:13px; backdrop-filter:blur(4px); }
+  #arPanel.visible { display:block; }
+  #arPanel button, #arPanel .fileBtn { padding:6px 12px; font-size:12px; margin:4px 0 0 0; }
+  #modelInfo { margin-top:6px; opacity:.8; }
+</style>
 </head>
 <body>
 
-<div id="info">Объектов размещено: <span id="count">0</span></div>
+<div id="arPanel">
+  Объектов: <span id="count">0</span>
+  <div>
+    <label class="fileBtn">📁 Модель .glb
+      <input type="file" id="fileInput" accept=".glb" hidden />
+    </label>
+    <button id="clearBtn">🗑 Очистить</button>
+  </div>
+  <div id="modelInfo"></div>
+</div>
 
 <div id="overlay">
-    <h2>AR: размещение объектов</h2>
-    <p id="status">Проверка поддержки WebXR…</p>
-    <button id="startBtn" disabled>Запустить AR</button>
+  <h2>AR: размещение 3D-модели</h2>
+  <p id="status">Инициализация…</p>
+  <button id="startBtn" disabled>Запустить AR</button>
 </div>
 
 <script type="importmap">
-{
-    "imports": {
-        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
-    }
-}
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
 </script>
 
 <script type="module">
 import * as THREE from 'three';
+import { GLTFLoader }    from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader }   from 'three/addons/loaders/DRACOLoader.js';
+import { SkeletonUtils } from 'three/addons/utils/SkeletonUtils.js';
 
-// ---------- DOM ----------
+/* ================== НАСТРОЙКИ ================== */
+const MODEL_URL    = 'стул.glb'; // ← своя модель. '' — сразу встроенный стул
+const TARGET_SIZE  = 0.45;                 // максимальный габарит модели в метрах
+/* ================================================ */
+
 const overlay  = document.getElementById('overlay');
 const statusEl = document.getElementById('status');
 const startBtn = document.getElementById('startBtn');
 const countEl  = document.getElementById('count');
+const arPanel  = document.getElementById('arPanel');
+const modelInfo= document.getElementById('modelInfo');
+const fileInput= document.getElementById('fileInput');
+const clearBtn = document.getElementById('clearBtn');
 
-// ---------- Three.js сцена ----------
-const scene    = new THREE.Scene();
-const camera   = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-renderer.setPixelRatio(window.devicePixelRatio);
-renderer.setSize(window.innerWidth, window.innerHeight);
+/* ---------- сцена ---------- */
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.01, 30);
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
 renderer.xr.enabled = true;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
-// Освещение (иначе StandardMaterial будет чёрным)
-scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.0));
-const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-dirLight.position.set(1, 2, 1);
-scene.add(dirLight);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x555555, 1.1));
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(1.5, 3, 1);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+sun.shadow.camera.near = 0.1; sun.shadow.camera.far = 8;
+sun.shadow.camera.left = -1;  sun.shadow.camera.right = 1;
+sun.shadow.camera.top = 1;    sun.shadow.camera.bottom = -1;
+scene.add(sun);
 
-// ---------- Визуальный маркер (кольцо) ----------
+/* ---------- маркер ---------- */
 const reticle = new THREE.Mesh(
-    new THREE.RingGeometry(0.05, 0.07, 32).rotateX(-Math.PI / 2),
-    new THREE.MeshBasicMaterial({ color: 0x00ff88, side: THREE.DoubleSide })
+  new THREE.RingGeometry(0.06, 0.08, 32).rotateX(-Math.PI/2),
+  new THREE.MeshBasicMaterial({ color:0x00ff88, side:THREE.DoubleSide })
 );
-reticle.matrixAutoUpdate = false; // позиция задаётся через matrix от hit-pose
+reticle.matrixAutoUpdate = false;
 reticle.visible = false;
 scene.add(reticle);
 
-// ---------- Шаблон размещаемого объекта ----------
-function createPlacedObject() {
-    const group = new THREE.Group();
-    const box = new THREE.Mesh(
-        new THREE.BoxGeometry(0.1, 0.1, 0.1),
-        new THREE.MeshStandardMaterial({ color: 0x2979ff, metalness: 0.3, roughness: 0.6 })
-    );
-    box.position.y = 0.05; // чтобы куб стоял на поверхности, а не «врос» в неё
-    group.add(box);
-    return group;
+/* ---------- приёмник тени под моделью ---------- */
+const shadowGeo = new THREE.PlaneGeometry(1.6, 1.6);
+const shadowMat = new THREE.ShadowMaterial({ opacity:0.35 });
+
+/* ---------- загрузчик ---------- */
+const loader = new GLTFLoader();
+const draco  = new DRACOLoader();
+draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
+loader.setDRACOLoader(draco);
+
+let baseModel  = null;    // нормализованный образец
+let modelAnims = [];      // клипы анимаций
+const placed   = [];      // размещённые объекты
+const mixers   = [];      // их анимационные миксеры
+
+/* ---------- нормализация: масштаб + «на полу» + центровка ---------- */
+function normalize(obj){
+  obj.updateMatrixWorld(true);
+  let box = new THREE.Box3().setFromObject(obj);
+  const size = new THREE.Vector3(); box.getSize(size);
+  const s = TARGET_SIZE / (Math.max(size.x, size.y, size.z) || 1);
+  obj.scale.multiplyScalar(s);
+
+  obj.updateMatrixWorld(true);
+  box = new THREE.Box3().setFromObject(obj);
+  obj.position.x -= (box.min.x + box.max.x) / 2;
+  obj.position.z -= (box.min.z + box.max.z) / 2;
+  obj.position.y -= box.min.y;               // нижняя грань на y = 0
+
+  obj.traverse(o => { if(o.isMesh){ o.castShadow = true; o.receiveShadow = true; } });
 }
 
-// ---------- WebXR: проверка поддержки ----------
-let xrSession        = null;
-let hitTestSource    = null;
-let hitTestReady     = false;
-let localRefSpace    = null;   // local-floor — для размещения (мировые координаты)
-let viewerRefSpace   = null;   // viewer — источник hit-test
+function setBase(source, animations, label){
+  const root = source.isObject3D ? source : source.scene;
+  const wrap = new THREE.Group();
+  wrap.add(root);
+  normalize(root);
+  baseModel  = wrap;
+  modelAnims = animations || [];
+  modelInfo.textContent = 'Модель: ' + label;
+}
 
-if (!navigator.xr) {
-    statusEl.textContent = 'WebXR не поддерживается в этом браузере.';
-} else {
-    navigator.xr.isSessionSupported('immersive-ar').then(supported => {
-        if (supported) {
-            statusEl.textContent = 'Устройство поддерживает AR. Нажмите кнопку.';
-            startBtn.disabled = false;
-        } else {
-            statusEl.textContent = 'immersive-ar недоступен. Используйте Chrome на Android или WebXR Emulator.';
-        }
+/* ---------- запасная мебель, если своей модели нет ---------- */
+function fallbackChair(){
+  const g = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color:0x8d6e63, roughness:0.85 });
+  const add = (geo, x,y,z) => { const m = new THREE.Mesh(geo, mat);
+                                 m.position.set(x,y,z); g.add(m); return m; };
+  add(new THREE.BoxGeometry(0.42,0.04,0.42), 0, 0.42, 0);            // сиденье
+  add(new THREE.BoxGeometry(0.42,0.45,0.04), 0, 0.66,-0.19);        // спинка
+  const leg = new THREE.CylinderGeometry(0.02,0.02,0.42,12);
+  [[-0.18,-0.18],[0.18,-0.18],[-0.18,0.18],[0.18,0.18]]
+    .forEach(([x,z]) => add(leg, x, 0.21, z));                       // ножки
+  return g;
+}
+
+async function loadModel(url, label){
+  return new Promise((res, rej) => loader.load(url,
+      gltf => { setBase(gltf, gltf.animations, label); res(); },
+      undefined, rej));
+}
+
+async function initModel(){
+  if (MODEL_URL) {
+    try { await loadModel(MODEL_URL, MODEL_URL.split('/').pop()); return; }
+    catch(e){ console.warn('Модель не найдена, используем встроенную:', e); }
+  }
+  setBase(fallbackChair(), [], 'встроенный стул (запасной)');
+}
+
+/* ---------- размещение ---------- */
+function createPlacedObject(){
+  if (!baseModel) return null;
+  const group = new THREE.Group();
+  const clone = SkeletonUtils.clone(baseModel);
+  group.add(clone);
+
+  const shadow = new THREE.Mesh(shadowGeo, shadowMat);
+  shadow.rotation.x = -Math.PI/2;
+  shadow.position.y = 0.002;
+  shadow.receiveShadow = true;
+  group.add(shadow);
+
+  if (modelAnims.length){
+    const mixer = new THREE.AnimationMixer(clone);
+    mixer.clipAction(modelAnims[0]).play();
+    mixers.push(mixer);
+  }
+  return group;
+}
+
+/* ================== WEBXR ================== */
+let session=null, hitSource=null, hitReady=false, viewerSpace=null, worldSpace=null;
+
+(async () => {
+  await initModel();
+  if (!navigator.xr) { statusEl.textContent = 'WebXR не поддерживается.'; return; }
+  const ok = await navigator.xr.isSessionSupported('immersive-ar');
+  if (!ok) { statusEl.textContent = 'immersive-ar недоступен (нужен Android Chrome или WebXR Emulator).'; return; }
+  statusEl.textContent = 'Готово. Наведите камеру на пол и коснитесь экрана.';
+  startBtn.disabled = false;
+})();
+
+startBtn.addEventListener('click', async () => {
+  try {
+    session = await navigator.xr.requestSession('immersive-ar', {
+      requiredFeatures: ['hit-test'],
+      optionalFeatures: ['local-floor', 'dom-overlay'],
+      domOverlay: { root: document.body }
     });
+
+    renderer.xr.setReferenceSpaceType('local-floor');
+    await renderer.xr.setSession(session);
+
+    viewerSpace = await session.requestReferenceSpace('viewer');
+    try   { worldSpace = await session.requestReferenceSpace('local-floor'); }
+    catch { worldSpace = await session.requestReferenceSpace('local'); }
+
+    hitSource = await session.requestHitTestSource({ space: viewerSpace });
+    hitReady  = true;
+
+    session.addEventListener('select', onSelect);
+    session.addEventListener('end', onEnd);
+
+    overlay.classList.add('hidden');
+    arPanel.classList.add('visible');
+    renderer.setAnimationLoop(render);
+  } catch(e){
+    console.error(e);
+    statusEl.textContent = 'Ошибка AR: ' + e.message;
+  }
+});
+
+function onSelect(){
+  if (!reticle.visible) return;
+  const obj = createPlacedObject();
+  if (!obj) return;
+  obj.matrix.copy(reticle.matrix);   // мировые координаты → объект зафиксирован
+  obj.matrixAutoUpdate = false;
+  scene.add(obj);
+  placed.push(obj);
+  countEl.textContent = placed.length;
 }
 
-// ---------- Запуск AR-сессии ----------
-startBtn.addEventListener('click', startAR);
-
-async function startAR() {
-    try {
-        xrSession = await navigator.xr.requestSession('immersive-ar', {
-            requiredFeatures: ['hit-test'],          // hit-test обязателен
-            optionalFeatures: ['local-floor', 'dom-overlay'],
-            domOverlay: { root: document.body }      // чтобы overlay оставался поверх AR
-        });
-
-        renderer.xr.setReferenceSpaceType('local-floor');
-        await renderer.xr.setSession(xrSession);
-
-        // Reference spaces
-        localRefSpace  = await xrSession.requestReferenceSpace('local-floor');
-        viewerRefSpace = await xrSession.requestReferenceSpace('viewer');
-
-        // Создаём источник hit-test из пространства камеры
-        hitTestSource = await xrSession.requestHitTestSource({ space: viewerRefSpace });
-        hitTestReady  = true;
-
-        // Тап по экрану → размещаем объект
-        xrSession.addEventListener('select', onSelect);
-
-        // Завершение сессии
-        xrSession.addEventListener('end', onSessionEnd);
-
-        overlay.classList.add('hidden');
-        renderer.setAnimationLoop(render);
-    } catch (err) {
-        console.error(err);
-        statusEl.textContent = 'Ошибка запуска AR: ' + err.message;
-    }
+function onEnd(){
+  session=null; hitSource=null; hitReady=false;
+  reticle.visible=false;
+  arPanel.classList.remove('visible');
+  overlay.classList.remove('hidden');
+  renderer.setAnimationLoop(null);
 }
 
-// ---------- Размещение объекта ----------
-function onSelect() {
-    if (!reticle.visible) return; // размещаем только если нашли плоскость
+/* ---------- панель внутри AR ---------- */
+arPanel.addEventListener('beforexrselect', e => e.preventDefault()); // тап по UI ≠ размещение
 
-    const obj = createPlacedObject();
-    // Копируем мировую трансформацию маркера → объект зафиксируется в мировых координатах
-    obj.matrix.copy(reticle.matrix);
-    obj.matrixAutoUpdate = false;
-    scene.add(obj);
+fileInput.addEventListener('change', async e => {
+  const file = e.target.files[0]; if (!file) return;
+  const url = URL.createObjectURL(file);
+  try { await loadModel(url, file.name); }
+  catch(err){ modelInfo.textContent = 'Не удалось загрузить: ' + err.message; }
+  finally { URL.revokeObjectURL(url); }
+});
 
-    countEl.textContent = String(parseInt(countEl.textContent, 10) + 1);
+clearBtn.addEventListener('click', () => {
+  placed.forEach(o => scene.remove(o));
+  placed.length = 0; mixers.length = 0;
+  countEl.textContent = '0';
+});
+
+/* ---------- цикл ---------- */
+const clock = new THREE.Clock();
+function render(_, frame){
+  if (!frame) return;
+
+  if (hitReady && hitSource){
+    const results = frame.getHitTestResults(hitSource);
+    if (results.length){
+      const pose = results[0].getPose(worldSpace);
+      reticle.visible = true;
+      reticle.matrix.fromArray(pose.transform.matrix);
+    } else reticle.visible = false;
+  }
+
+  const dt = clock.getDelta();
+  for (const m of mixers) m.update(dt);
+
+  renderer.render(scene, camera);
 }
 
-// ---------- Завершение сессии ----------
-function onSessionEnd() {
-    xrSession = null;
-    hitTestSource = null;
-    hitTestReady = false;
-    reticle.visible = false;
-    overlay.classList.remove('hidden');
-    statusEl.textContent = 'AR-сессия завершена.';
-    startBtn.disabled = false;
-    renderer.setAnimationLoop(null);
-}
-
-// ---------- Рендер-цикл: обновляем маркер по hit-test ----------
-function render(timestamp, frame) {
-    if (!frame) return;
-
-    if (hitTestReady && hitTestSource) {
-        // results — массив попаданий по плоскостям в текущем кадре
-        const results = frame.getHitTestResults(hitTestSource);
-        if (results.length > 0) {
-            const hit  = results[0];
-            const pose = hit.getPose(localRefSpace); // ВАЖНО: pose в local-floor, чтобы координаты совпадали с размещаемыми объектами
-            reticle.visible = true;
-            reticle.matrix.fromArray(pose.transform.matrix);
-        } else {
-            reticle.visible = false;
-        }
-    }
-
-    renderer.render(scene, camera);
-}
-
-// ---------- Ресайз ----------
-window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
 });
 </script>
 </body>
